@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import argparse
+import configparser
 import logging
 import os
 import subprocess
@@ -9,9 +10,41 @@ import whisper
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 from tqdm import tqdm
 
+CONFIG_FILE = "config.ini"
+
+# Default configuration values
+DEFAULT_CONFIG = {
+    "whisper_model": "small",                # Whisper model size: tiny, base, small, medium, large
+    "target_languages": "en",                # Comma-separated list of target languages (default: English only)
+    "translation_model": "facebook/m2m100_418M",  # Translation model to use
+}
+
 # Set up logger
 logger = logging.getLogger("VideoTranslator")
 logging.basicConfig(format="%(levelname)s: %(message)s", level=logging.INFO)
+
+
+def create_default_config(path):
+    config = configparser.ConfigParser()
+    config["settings"] = DEFAULT_CONFIG
+    with open(path, "w", encoding="utf-8") as configfile:
+        config.write(configfile)
+    logger.info(f"Default configuration created at {path}")
+
+
+def load_config(path):
+    if not os.path.exists(path):
+        create_default_config(path)
+    config = configparser.ConfigParser()
+    config.read(path)
+    # Get settings with defaults if not defined
+    settings = config["settings"]
+    config_values = {
+        "whisper_model": settings.get("whisper_model", DEFAULT_CONFIG["whisper_model"]),
+        "target_languages": [lang.strip() for lang in settings.get("target_languages", DEFAULT_CONFIG["target_languages"]).split(",")],
+        "translation_model": settings.get("translation_model", DEFAULT_CONFIG["translation_model"]),
+    }
+    return config_values
 
 
 def extract_audio(video_path, audio_path=None, debug=False):
@@ -20,11 +53,11 @@ def extract_audio(video_path, audio_path=None, debug=False):
         audio_path = base + ".wav"
     cmd = [
         "ffmpeg",
-        "-y",             # overwrite output file if exists
-        "-i", video_path, # input file
-        "-vn",            # no video
-        "-ac", "1",       # mono channel
-        "-ar", "16000",   # sample rate 16kHz
+        "-y",             # Overwrite output file if exists
+        "-i", video_path, # Input file
+        "-vn",            # No video
+        "-ac", "1",       # Mono channel
+        "-ar", "16000",   # Sample rate 16kHz
         audio_path,
     ]
     if debug:
@@ -60,13 +93,11 @@ def format_timestamp(seconds):
 
 def translate_segments(segments, tokenizer, model_trans, source_lang, target_lang, debug=False):
     translations = []
-    # Loop through each transcription segment with a progress bar when in debug mode.
     for seg in tqdm(segments, desc=f"Translating to {target_lang}", disable=not debug):
         text = seg.get("text", "").strip()
         if not text:
             translations.append("")
             continue
-        # Set source language and target language token
         tokenizer.src_lang = source_lang
         target_id = tokenizer.get_lang_id(target_lang)
         encoded = tokenizer(text, return_tensors="pt")
@@ -90,20 +121,13 @@ def save_srt_file(segments, translations, output_filename, debug=False):
 
 
 def main():
+    # Load config settings
+    config = load_config(CONFIG_FILE)
+
     parser = argparse.ArgumentParser(description="VideoTranslator: Offline Subtitle Generator")
     parser.add_argument("video", help="Input video file")
-    parser.add_argument(
-        "--model",
-        default="small",
-        choices=["tiny", "base", "small", "medium", "large"],
-        help="Whisper model size to use (default: small)",
-    )
-    parser.add_argument(
-        "--languages",
-        nargs="+",
-        default=["en", "es", "fr"],
-        help="Target language codes for translation (default: en es fr)",
-    )
+    parser.add_argument("--model", default=None, help="Whisper model size to use (overrides config)")
+    parser.add_argument("--languages", nargs="+", default=None, help="Target language codes for translation (overrides config)")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose logging and progress bar")
     args = parser.parse_args()
 
@@ -111,11 +135,15 @@ def main():
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled.")
 
+    # Use config values unless overridden by command-line
+    whisper_model = args.model if args.model else config["whisper_model"]
+    target_languages = args.languages if args.languages else config["target_languages"]
+
     # Step 1: Extract audio from the video.
     audio_path = extract_audio(args.video, debug=args.debug)
 
     # Step 2: Transcribe the audio using Whisper.
-    transcription_result = transcribe_audio(audio_path, model_size=args.model, debug=args.debug)
+    transcription_result = transcribe_audio(audio_path, model_size=whisper_model, debug=args.debug)
     segments = transcription_result.get("segments", [])
     if not segments:
         logger.error("No transcription segments found!")
@@ -125,20 +153,28 @@ def main():
     if args.debug:
         logger.debug(f"Detected source language: {source_lang}")
 
-    # Step 3: Load translation model (M2M100).
+    # Step 3: Load translation model as defined in config.
     if args.debug:
-        logger.info("Loading translation model (facebook/m2m100_418M)...")
-    tokenizer = M2M100Tokenizer.from_pretrained("facebook/m2m100_418M")
-    model_trans = M2M100ForConditionalGeneration.from_pretrained("facebook/m2m100_418M")
+        logger.info(f"Loading translation model ({config['translation_model']})...")
+    tokenizer = M2M100Tokenizer.from_pretrained(config["translation_model"])
+    model_trans = M2M100ForConditionalGeneration.from_pretrained(config["translation_model"])
 
     base_name = os.path.splitext(args.video)[0]
-    # Step 4: Translate each segment into the target languages and generate SRT files.
-    for lang in args.languages:
+    # Step 4: Translate segments for each target language and generate SRT files.
+    for lang in target_languages:
         if args.debug:
             logger.info(f"Translating segments to {lang}...")
         translations = translate_segments(segments, tokenizer, model_trans, source_lang, lang, debug=args.debug)
         output_srt = f"{base_name}_{lang}.srt"
         save_srt_file(segments, translations, output_srt, debug=args.debug)
+
+    # Step 5: Delete temporary audio file.
+    try:
+        os.remove(audio_path)
+        if args.debug:
+            logger.info(f"Deleted temporary audio file: {audio_path}")
+    except Exception as e:
+        logger.error(f"Could not delete temporary audio file: {audio_path}. Error: {e}")
 
     if args.debug:
         logger.info("All subtitle files generated successfully.")
