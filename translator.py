@@ -14,8 +14,8 @@ CONFIG_FILE = "config.ini"
 
 # Default configuration values
 DEFAULT_CONFIG = {
-    "whisper_model": "small",                 # Whisper model size: tiny, base, small, medium, large
-    "target_languages": "en",                 # Comma-separated list of target languages (default: English only)
+    "whisper_model": "small",                   # Whisper model size: tiny, base, small, medium, large
+    "target_languages": "en",                   # Comma-separated list of target languages (default: English only)
     "translation_model": "facebook/m2m100_418M",  # Translation model to use
 }
 
@@ -91,8 +91,15 @@ def format_timestamp(seconds):
 
 
 def translate_segments(segments, tokenizer, model_trans, source_lang, target_lang, debug=False):
+    # Map unsupported language codes if necessary
+    language_mapping = {
+        "nn": "no",  # Map Nynorsk to Norwegian
+        "jw": "jv",  # Map Javanese (as returned by Whisper) to ISO code "jv"
+    }
+    if source_lang in language_mapping:
+        source_lang = language_mapping[source_lang]
+
     translations = []
-    # Always show a progress bar for segment translation.
     for seg in tqdm(segments, desc=f"Translating to {target_lang}", position=1, leave=False):
         text = seg.get("text", "").strip()
         if not text:
