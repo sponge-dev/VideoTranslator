@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 
 import whisper
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
@@ -14,8 +15,8 @@ CONFIG_FILE = "config.ini"
 
 # Default configuration values
 DEFAULT_CONFIG = {
-    "whisper_model": "small",                # Whisper model size: tiny, base, small, medium, large
-    "target_languages": "en",                # Comma-separated list of target languages (default: English only)
+    "whisper_model": "small",                 # Whisper model size: tiny, base, small, medium, large
+    "target_languages": "en",                 # Comma-separated list of target languages (default: English only)
     "translation_model": "facebook/m2m100_418M",  # Translation model to use
 }
 
@@ -37,7 +38,6 @@ def load_config(path):
         create_default_config(path)
     config = configparser.ConfigParser()
     config.read(path)
-    # Get settings with defaults if not defined
     settings = config["settings"]
     config_values = {
         "whisper_model": settings.get("whisper_model", DEFAULT_CONFIG["whisper_model"]),
@@ -93,7 +93,7 @@ def format_timestamp(seconds):
 
 def translate_segments(segments, tokenizer, model_trans, source_lang, target_lang, debug=False):
     translations = []
-    for seg in tqdm(segments, desc=f"Translating to {target_lang}", disable=not debug):
+    for seg in tqdm(segments, desc=f"Translating to {target_lang}", disable=not debug, leave=False):
         text = seg.get("text", "").strip()
         if not text:
             translations.append("")
@@ -128,7 +128,7 @@ def main():
     parser.add_argument("video", help="Input video file")
     parser.add_argument("--model", default=None, help="Whisper model size to use (overrides config)")
     parser.add_argument("--languages", nargs="+", default=None, help="Target language codes for translation (overrides config)")
-    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose logging and progress bar")
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose logging and progress bars")
     args = parser.parse_args()
 
     if args.debug:
@@ -139,8 +139,15 @@ def main():
     whisper_model = args.model if args.model else config["whisper_model"]
     target_languages = args.languages if args.languages else config["target_languages"]
 
+    # If debug mode, set up an overall progress bar.
+    overall_steps = 3 + len(target_languages)  # Extraction, Transcription, for each language (translation+SRT), Cleanup
+    overall_pbar = tqdm(total=overall_steps, desc="Overall Progress", position=0) if args.debug else None
+
     # Step 1: Extract audio from the video.
     audio_path = extract_audio(args.video, debug=args.debug)
+    if overall_pbar:
+        overall_pbar.update(1)
+        overall_pbar.set_description("Audio extraction complete")
 
     # Step 2: Transcribe the audio using Whisper.
     transcription_result = transcribe_audio(audio_path, model_size=whisper_model, debug=args.debug)
@@ -148,10 +155,11 @@ def main():
     if not segments:
         logger.error("No transcription segments found!")
         sys.exit(1)
-
     source_lang = transcription_result.get("language", "en")
     if args.debug:
         logger.debug(f"Detected source language: {source_lang}")
+        overall_pbar.update(1)
+        overall_pbar.set_description("Transcription complete")
 
     # Step 3: Load translation model as defined in config.
     if args.debug:
@@ -160,13 +168,16 @@ def main():
     model_trans = M2M100ForConditionalGeneration.from_pretrained(config["translation_model"])
 
     base_name = os.path.splitext(args.video)[0]
-    # Step 4: Translate segments for each target language and generate SRT files.
+    # Step 4: For each target language, translate segments and generate SRT.
     for lang in target_languages:
         if args.debug:
             logger.info(f"Translating segments to {lang}...")
         translations = translate_segments(segments, tokenizer, model_trans, source_lang, lang, debug=args.debug)
         output_srt = f"{base_name}_{lang}.srt"
         save_srt_file(segments, translations, output_srt, debug=args.debug)
+        if overall_pbar:
+            overall_pbar.update(1)
+            overall_pbar.set_description(f"Completed translation for {lang}")
 
     # Step 5: Delete temporary audio file.
     try:
@@ -175,6 +186,10 @@ def main():
             logger.info(f"Deleted temporary audio file: {audio_path}")
     except Exception as e:
         logger.error(f"Could not delete temporary audio file: {audio_path}. Error: {e}")
+    if overall_pbar:
+        overall_pbar.update(1)
+        overall_pbar.set_description("Cleanup complete")
+        overall_pbar.close()
 
     if args.debug:
         logger.info("All subtitle files generated successfully.")
