@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 
+import torch
 import whisper
 from transformers import M2M100ForConditionalGeneration, M2M100Tokenizer
 from tqdm import tqdm
@@ -17,6 +18,7 @@ DEFAULT_CONFIG = {
     "whisper_model": "small",                   # Whisper model size: tiny, base, small, medium, large
     "target_languages": "en",                   # Comma-separated list of target languages (default: English only)
     "translation_model": "facebook/m2m100_418M",  # Translation model to use
+    "device": "gpu",                            # Default device: "gpu" or "cpu"
 }
 
 # Set up logger
@@ -42,6 +44,7 @@ def load_config(path):
         "whisper_model": settings.get("whisper_model", DEFAULT_CONFIG["whisper_model"]),
         "target_languages": [lang.strip() for lang in settings.get("target_languages", DEFAULT_CONFIG["target_languages"]).split(",")],
         "translation_model": settings.get("translation_model", DEFAULT_CONFIG["translation_model"]),
+        "device": settings.get("device", DEFAULT_CONFIG["device"]).lower(),
     }
     return config_values
 
@@ -68,10 +71,15 @@ def extract_audio(video_path, audio_path=None, debug=False):
     return audio_path
 
 
-def transcribe_audio(audio_path, model_size="small", debug=False):
-    if debug:
-        logger.info(f"Loading Whisper model ('{model_size}')")
-    model = whisper.load_model(model_size)
+def transcribe_audio(audio_path, model_size="small", debug=False, device="cuda"):
+    try:
+        if debug:
+            logger.info(f"Loading Whisper model ('{model_size}') on device '{device}'")
+        model = whisper.load_model(model_size, device=device)
+    except torch.OutOfMemoryError as e:
+        logger.error("CUDA out of memory while loading Whisper model. "
+                     "Try using the --cpu flag or a smaller model size.")
+        sys.exit(1)
     if debug:
         logger.info("Starting transcription (this may take a while)...")
     result = model.transcribe(audio_path, verbose=debug)
@@ -90,7 +98,7 @@ def format_timestamp(seconds):
     return f"{hrs:02d}:{mins:02d}:{secs:02d},{ms:03d}"
 
 
-def translate_segments(segments, tokenizer, model_trans, source_lang, target_lang, debug=False):
+def translate_segments(segments, tokenizer, model_trans, source_lang, target_lang, debug=False, device="cuda"):
     # Map unsupported language codes if necessary
     language_mapping = {
         "nn": "no",  # Map Nynorsk to Norwegian
@@ -107,7 +115,8 @@ def translate_segments(segments, tokenizer, model_trans, source_lang, target_lan
             continue
         tokenizer.src_lang = source_lang
         target_id = tokenizer.get_lang_id(target_lang)
-        encoded = tokenizer(text, return_tensors="pt")
+        # Encode text and move tensors to the target device
+        encoded = tokenizer(text, return_tensors="pt").to(device)
         outputs = model_trans.generate(**encoded, forced_bos_token_id=target_id)
         translation = tokenizer.decode(outputs[0], skip_special_tokens=True)
         translations.append(translation)
@@ -172,29 +181,72 @@ def main():
     config = load_config(CONFIG_FILE)
 
     parser = argparse.ArgumentParser(description="VideoTranslator: Offline Subtitle Generator")
-    # Accept one or more video files
-    parser.add_argument("video", nargs="+", help="Input video file(s)")
+    # Positional argument for video file(s) (ignored if -r is provided)
+    parser.add_argument("video", nargs="*", help="Input video file(s)")
     parser.add_argument("--model", default=None, help="Whisper model size to use (overrides config)")
     parser.add_argument("--languages", nargs="+", default=None, help="Target language codes for translation (overrides config)")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU usage for processing")
+    parser.add_argument("--gpu", action="store_true", help="Force GPU usage for processing")
+    parser.add_argument("--offline", action="store_true", help="Use Transformers in offline mode (if models are cached)")
     parser.add_argument("--debug", action="store_true", help="Enable debug mode with verbose logging")
+    parser.add_argument("-r", "--recursive", type=str, help="Text file containing list of video paths to process recursively")
     args = parser.parse_args()
 
     if args.debug:
         logger.setLevel(logging.DEBUG)
         logger.debug("Debug mode enabled.")
 
+    # Determine device: command-line flags override config file.
+    if args.cpu:
+        device = "cpu"
+    elif args.gpu:
+        device = "cuda"
+    else:
+        device = "cuda" if config["device"] == "gpu" and torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
+
+    # Set Transformers offline mode if requested
+    if args.offline:
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        logger.info("Transformers set to offline mode.")
+
+    # If using CUDA, set environment variable to help with memory fragmentation.
+    if device == "cuda":
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
     # Use config values unless overridden by command-line
     whisper_model = args.model if args.model else config["whisper_model"]
     target_languages = args.languages if args.languages else config["target_languages"]
 
+    # Determine list of video files: use recursive file list if provided.
+    if args.recursive:
+        if not os.path.exists(args.recursive):
+            logger.error(f"Recursive list file '{args.recursive}' does not exist!")
+            sys.exit(1)
+        with open(args.recursive, "r", encoding="utf-8") as f:
+            video_files = [line.strip() for line in f if line.strip()]
+    else:
+        video_files = args.video
+
+    if not video_files:
+        logger.error("No video files provided. Specify files directly or via the -r option.")
+        sys.exit(1)
+
     # Load translation model once for all videos
-    if args.debug:
-        logger.info(f"Loading translation model ({config['translation_model']})...")
-    tokenizer = M2M100Tokenizer.from_pretrained(config["translation_model"])
-    model_trans = M2M100ForConditionalGeneration.from_pretrained(config["translation_model"])
+    try:
+        if args.debug:
+            logger.info(f"Loading translation model ({config['translation_model']}) on device '{device}'...")
+        tokenizer = M2M100Tokenizer.from_pretrained(config["translation_model"])
+        model_trans = M2M100ForConditionalGeneration.from_pretrained(config["translation_model"])
+        model_trans.to(device)
+    except Exception as e:
+        logger.error("Error loading translation model. "
+                     "Check your network connection or try using the --offline flag if models are cached.")
+        logger.error(e)
+        sys.exit(1)
 
     # Process each video file one by one
-    for video_file in args.video:
+    for video_file in video_files:
         logger.info(f"Processing video: {video_file}")
         overall_steps = 3 + len(target_languages) + 1  # Extraction, Transcription, per-language translation+SRT, Cleanup
         overall_pbar = tqdm(total=overall_steps, desc=f"Processing {video_file}", position=0, leave=True)
@@ -205,7 +257,7 @@ def main():
         overall_pbar.set_description("Audio extraction complete")
 
         # Step 2: Transcribe the audio using Whisper.
-        transcription_result = transcribe_audio(audio_path, model_size=whisper_model, debug=args.debug)
+        transcription_result = transcribe_audio(audio_path, model_size=whisper_model, debug=args.debug, device=device)
         segments = transcription_result.get("segments", [])
         if not segments:
             logger.error(f"No transcription segments found for {video_file}!")
@@ -225,7 +277,7 @@ def main():
         base_name = os.path.splitext(video_file)[0]
         for lang in target_languages:
             logger.info(f"Translating segments to {lang} for video {video_file}...")
-            translations = translate_segments(segments, tokenizer, model_trans, source_lang, lang, debug=args.debug)
+            translations = translate_segments(segments, tokenizer, model_trans, source_lang, lang, debug=args.debug, device=device)
             output_srt = f"{base_name}_{lang}.srt"
             save_srt_file(segments, translations, output_srt, debug=args.debug)
             overall_pbar.update(1)
