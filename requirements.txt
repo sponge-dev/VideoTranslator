@@ -1,5 +1,4 @@
-openai-whisper==20240930
-transformers>=4.22.1
-torch>=1.12.1
-sentencepiece>=0.1.95
-tqdm>=4.64.1
+torch>=1.7.0
+whisper
+transformers
+tqdm

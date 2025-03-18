@@ -1,81 +1,82 @@
-# VideoTranslator: Offline Subtitle Generator
+# VideoTranslator
 
-VideoTranslator is a Python tool that extracts audio from video files, transcribes the audio using an offline speech-to-text model (OpenAI Whisper), translates the transcription into multiple languages using an offline translation model (via Hugging Face Transformers), and generates subtitle files (SRT) for playback in media players like VLC.
+VideoTranslator is an offline subtitle generator that extracts audio from video files, transcribes the audio using OpenAI's Whisper model, and translates the transcription into one or more target languages using the Facebook M2M100 translation model. The tool produces SRT subtitle files for each specified target language.
 
 ## Features
-- **Audio Extraction:** Automatically extract audio from common video formats using FFmpeg.
-- **Speech-to-Text Transcription:** Use OpenAI Whisper to transcribe audio offline.
-- **Offline Translation:** Translate transcribed text into multiple languages using multilingual translation models.
-- **Subtitle Generation:** Create standard SRT files with accurate timing for each translation.
-- **Debug Mode:** When running with the `--debug` flag, the script will output detailed logs for troubleshooting and display a loading progress bar during long operations.
+
+- **Audio Extraction:** Uses `ffmpeg` to extract audio from video files.
+- **Speech Transcription:** Leverages Whisper to transcribe audio.
+- **Translation:** Translates transcribed text into one or more languages using the M2M100 model from Hugging Face.
+- **Subtitle Generation:** Merges and formats segments into SRT files.
+- **Configurable:** Uses a `config.ini` file to set default parameters (Whisper model, target languages, translation model, device, etc.) with the ability to override them via command-line arguments.
+- **Offline Mode:** Supports offline mode for Transformers if models are cached.
 
 ## Prerequisites
-- **Python:** Recommended version is Python 3.11 (Python 3.8–3.11 are supported). *Note: Python 3.13 is not yet supported by Whisper and some dependencies.*
-- **FFmpeg:** Ensure FFmpeg is installed and available in your PATH.  
-  On Arch Linux, install via:
-  ```bash
-  sudo pacman -S ffmpeg
-  ```
-- **Pyenv (optional):** To manage multiple Python versions, consider using [pyenv](https://github.com/pyenv/pyenv).
+
+- **Python 3.7+**
+- **ffmpeg:** Ensure that `ffmpeg` is installed and available in your system’s PATH.
+- A working installation of **CUDA** is recommended if you plan to use GPU acceleration (otherwise, the tool will default to CPU).
 
 ## Installation
-1. **Clone the Repository**
-   ```bash
-   git clone https://github.com/yourusername/VideoTranslator.git
-   cd VideoTranslator
-   ```
 
-2. **Set Up the Python Environment**  
-   If using pyenv, install and select Python 3.11.9:
-   ```bash
-   pyenv install 3.11.9
-   pyenv local 3.11.9
-   ```
-   Create and activate a virtual environment:
-   ```bash
-   python -m venv venv
-   source venv/bin/activate
-   ```
+1. **Clone the repository or download the script.**
 
-3. **Install Dependencies**
-   Upgrade build tools and install required packages:
+2. **Install the required Python packages:**
+
    ```bash
-   pip install --upgrade pip setuptools wheel
    pip install -r requirements.txt
    ```
 
+3. **Install ffmpeg:**  
+   - On Ubuntu/Debian:
+     ```bash
+     sudo apt-get install ffmpeg
+     ```
+   - On macOS (using Homebrew):
+     ```bash
+     brew install ffmpeg
+     ```
+   - On Windows, download the executable from the [official site](https://ffmpeg.org/download.html) and add it to your PATH.
+
 ## Usage
-Run the main script with your video file as an argument. Use the `--debug` flag to enable verbose logging and display the progress bar.
+
+Run the script from the command line by specifying the video files to process. For example:
+
 ```bash
-python main.py input_video.mp4 --debug
+./your_script.py video1.mp4 video2.mkv
 ```
-The script will:
-- Extract the audio from the video.
-- Transcribe the audio using Whisper.
-- Translate the transcription into specified target languages.
-- Generate SRT subtitle files (e.g., `input_video_en.srt`, `input_video_es.srt`, etc.).
 
-### Debug Mode
-When running in debug mode:
-- **Verbose Logging:** The script will print additional debug messages that include error details and status updates.
-- **Progress Bar:** A progress bar (using the `tqdm` library) will display during long-running tasks such as audio transcription and translation, giving visual feedback of the operation's progress.
+Additional command-line options:
 
-## Customization
-- **Target Languages:** Modify the list of target languages in the script.
-- **Model Options:** Change the Whisper model (e.g., `tiny`, `base`, `small`, `medium`) for different performance and accuracy tradeoffs.
-- **Debug Enhancements:** You can further enhance debugging by integrating Python’s logging module or using libraries like `rich` for formatted console output.
+- `--model` : Override the Whisper model size (e.g., `tiny`, `base`, `small`, `medium`, `large`).
+- `--languages` : Specify one or more target language codes for translation.
+- `--cpu` / `--gpu` : Force CPU or GPU processing.
+- `--offline` : Run Transformers in offline mode if models are already cached.
+- `--debug` : Enable debug mode with verbose logging.
+- `-r, --recursive` : Provide a text file containing a list of video paths to process.
+
+Example with overrides:
+
+```bash
+./your_script.py my_video.mp4 --model small --languages en fr de --cpu --debug
+```
+
+## Configuration
+
+The script uses a configuration file (`config.ini`) to set default values. If the file does not exist, it will be automatically created with default settings:
+
+```ini
+[settings]
+whisper_model = small
+target_languages = en
+translation_model = facebook/m2m100_418M
+device = gpu
+```
+
+You can edit this file to set your preferred defaults.
 
 ## Troubleshooting
-- Ensure you are using a supported Python version (3.8–3.11).
-- Verify that FFmpeg is installed and in your system PATH.
-- If you encounter build errors, confirm that your build tools (pip, setuptools, wheel) are up-to-date.
-- Use the `--debug` flag to obtain more detailed error information.
 
-## License
-This project is licensed under the MIT License.
-
-## Acknowledgments
-- [OpenAI Whisper](https://github.com/openai/whisper)
-- [Hugging Face Transformers](https://github.com/huggingface/transformers)
-- [tqdm](https://github.com/tqdm/tqdm)
-```
+- **CUDA Memory Issues:** If you encounter CUDA out-of-memory errors, try using the `--cpu` flag or a smaller Whisper model.
+- **ffmpeg Errors:** Ensure that `ffmpeg` is properly installed and accessible via your system’s PATH.
+- **Offline Mode:** Use the `--offline` flag if you have already cached the necessary Transformer models.
